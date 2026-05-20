@@ -1,4 +1,6 @@
 const FileModel = require("../models/File");
+const path = require("path");
+const fs = require("fs");
 const { extractText } = require("../services/pdfService");
 const { chatModel, embeddings } = require("../services/aiService");
 const { Pinecone } = require("@pinecone-database/pinecone");
@@ -38,10 +40,11 @@ exports.ingestFile = async (req, res) => {
     const describeIndex = await pc.describeIndex(process.env.PINECONE_INDEX.trim());
     const host = describeIndex.host;
 
+    const ownerId = req.user ? req.user.id : req.ip;
     const records = docs.map((doc, i) => ({
       id: `v-${Date.now()}-${i}`,
       values: vectors[i],
-      metadata: { text: doc.pageContent, source: req.file.originalname },
+      metadata: { text: doc.pageContent, source: req.file.originalname, userId: ownerId },
     }));
 
     await fetch(`https://${host}/vectors/upsert`, {
@@ -101,14 +104,12 @@ You MUST return ONLY a valid JSON object in this exact structure. Do not include
       };
     }
 
-    let newFile = null;
-    if (req.user) {
-      newFile = new FileModel({
-        userId: req.user.id,
-        name: req.file.originalname,
-      });
-      await newFile.save();
-    }
+    let newFile = new FileModel({
+      userId: ownerId,
+      name: req.file.originalname,
+      filePath: req.file.path,
+    });
+    await newFile.save();
 
     res.json({
       message: "Success",
@@ -138,12 +139,37 @@ exports.deleteFile = async (req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        filter: { source: { $eq: name } }, 
+        filter: { 
+          source: { $eq: name },
+          userId: { $eq: req.user ? req.user.id : req.ip }
+        }, 
         namespace: "student-notes",
       }),
     });
 
     res.json({ message: "File deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.viewFile = async (req, res) => {
+  try {
+    const { name } = req.params;
+    const ownerId = req.user ? req.user.id : req.ip;
+
+    const file = await FileModel.findOne({ name, userId: ownerId });
+    
+    if (!file || !file.filePath) {
+      return res.status(404).json({ error: "File not found or unauthorized" });
+    }
+
+    const absolutePath = path.resolve(file.filePath);
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: "File not found on disk" });
+    }
+
+    res.sendFile(absolutePath);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

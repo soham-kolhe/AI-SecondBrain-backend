@@ -119,7 +119,7 @@ OUTPUT FORMAT (return ONLY this):
   ]
 }`;
 
-async function fetchPineconeContext(query, topK = 6) {
+async function fetchPineconeContext(query, ownerId, topK = 6) {
   const queryVector = await embeddings.embedQuery(query);
   const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
   const describeIndex = await pc.describeIndex(process.env.PINECONE_INDEX.trim());
@@ -127,12 +127,18 @@ async function fetchPineconeContext(query, topK = 6) {
   const searchRes = await fetch(`https://${describeIndex.host}/query`, {
     method: "POST",
     headers: { "Api-Key": process.env.PINECONE_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ vector: queryVector, topK, includeMetadata: true, namespace: "student-notes" }),
+    body: JSON.stringify({ vector: queryVector, topK, includeMetadata: true, namespace: "student-notes", filter: { userId: ownerId } }),
   });
 
   const data = await searchRes.json();
-  const sources = [...new Set(data.matches.map((m) => m.metadata.source))];
-  const context = data.matches.map((m) => m.metadata.text).join("\n---\n");
+  const validMatches = data.matches ? data.matches.filter(m => m.score > 0.75) : [];
+  
+  if (validMatches.length === 0) {
+    return { context: "", sources: [] };
+  }
+
+  const sources = [...new Set(validMatches.map((m) => m.metadata.source))];
+  const context = validMatches.map((m) => m.metadata.text).join("\n---\n");
   return { context, sources };
 }
 
@@ -148,6 +154,7 @@ function parseAIJson(content) {
 exports.askChat = async (req, res) => {
   const { question, strictMode, mode } = req.body;
   const isCommand = typeof question === "string" && question.trim().startsWith("/");
+  const ownerId = req.user ? req.user.id : req.ip;
 
   // 1. SECURITY & AUTH GUARD
   if (mode === "test" || (isCommand && question.trim() !== "/reset" && question.trim() !== "/clear")) {
@@ -193,7 +200,7 @@ exports.askChat = async (req, res) => {
 
       if (command === "/10") {
         const targetFile = filename || "the document";
-        const { context, sources } = await fetchPineconeContext(`Additional challenging topics from ${targetFile}`, 8);
+        const { context, sources } = await fetchPineconeContext(`Additional challenging topics from ${targetFile}`, ownerId, 8);
 
         const aiResponse = await chatModel.invoke([
           ["system", MCQ_SYSTEM_PROMPT],
@@ -231,7 +238,7 @@ exports.askChat = async (req, res) => {
         }
 
         const topicNames = weakTopics.map(t => t.topic);
-        const { context, sources } = await fetchPineconeContext(`Focus on these topics: ${topicNames.join(", ")}`, 8);
+        const { context, sources } = await fetchPineconeContext(`Focus on these topics: ${topicNames.join(", ")}`, ownerId, 8);
 
         const aiResponse = await chatModel.invoke([
           ["system", MCQ_SYSTEM_PROMPT],
@@ -256,7 +263,7 @@ exports.askChat = async (req, res) => {
 
   // 3. STANDARD RAG CHAT
   try {
-    const { context, sources } = await fetchPineconeContext(question, 4);
+    const { context, sources } = await fetchPineconeContext(question, ownerId, 4);
 
     const strictPrompt = `You are a Strict Student Assistant. RULES:\n1. Use ONLY the provided context to answer. \n2. If the answer is NOT in the context, say EXACTLY: "Bhai, ye tere notes mein nahi hai, shayad sir ne nahi padhaya."\n3. Do not use your own knowledge or the internet.\n4. No citation brackets like [a], [b].`;
     const normalPrompt = `You are a helpful assistant. Use the context to answer, but if it's missing, you can provide general guidance while mentioning it's not in the notes.`;
