@@ -1,7 +1,7 @@
 const FileModel = require("../models/File");
 const path = require("path");
 const fs = require("fs");
-const { extractText } = require("../services/pdfService");
+const { extractText, extractTextPages } = require("../services/pdfService");
 const { chatModel, embeddings } = require("../services/aiService");
 const { Pinecone } = require("@pinecone-database/pinecone");
 const { RecursiveCharacterTextSplitter } = require("@langchain/textsplitters");
@@ -26,6 +26,15 @@ exports.ingestFile = async (req, res) => {
     }
 
     console.log("📄 Extracted Text Length:", rawText.length);
+
+    console.log("Testing Azure Embeddings...");
+
+const testEmbedding = await embeddings.embedQuery("hello world");
+
+console.log(
+  "Embedding length:",
+  testEmbedding.length
+);
 
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
@@ -156,9 +165,18 @@ exports.deleteFile = async (req, res) => {
 exports.viewFile = async (req, res) => {
   try {
     const { name } = req.params;
-    const ownerId = req.user ? req.user.id : req.ip;
+    const decodedName = decodeURIComponent(name).trim();
+    console.log("PDF Viewer requested name (raw):", name);
+    console.log("PDF Viewer requested name (decoded):", decodedName);
 
-    const file = await FileModel.findOne({ name, userId: ownerId });
+    // Escape regex characters helper
+    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    const file = await FileModel.findOne({ 
+      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+    });
+    
+    console.log("Found file in DB:", file);
     
     if (!file || !file.filePath) {
       return res.status(404).json({ error: "File not found or unauthorized" });
@@ -169,8 +187,44 @@ exports.viewFile = async (req, res) => {
       return res.status(404).json({ error: "File not found on disk" });
     }
 
-    res.sendFile(absolutePath);
+    const stat = fs.statSync(absolutePath);
+    res.writeHead(200, {
+      "Content-Type": "application/pdf",
+      "Content-Length": stat.size
+    });
+    
+    const stream = fs.createReadStream(absolutePath);
+    stream.pipe(res);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.getFileText = async (req, res) => {
+  try {
+    const { name } = req.params;
+    const decodedName = decodeURIComponent(name).trim();
+    console.log("PDF text requested name (raw):", name);
+    console.log("PDF text requested name (decoded):", decodedName);
+
+    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const file = await FileModel.findOne({ 
+      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+    });
+    
+    if (!file || !file.filePath) {
+      return res.status(404).json({ error: "File not found or unauthorized" });
+    }
+
+    const absolutePath = path.resolve(file.filePath);
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: "File not found on disk" });
+    }
+
+    const pages = await extractTextPages(absolutePath);
+    res.json({ name: decodedName, pages });
+  } catch (err) {
+    console.error("Error extracting text pages:", err);
     res.status(500).json({ error: err.message });
   }
 };

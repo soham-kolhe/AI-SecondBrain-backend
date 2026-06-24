@@ -27,6 +27,19 @@ exports.getSession = async (req, res) => {
   }
 };
 
+function cleanAndTitleCase(str) {
+  if (!str) return "New Chat";
+  // Remove emojis, symbols, logos, and special punctuation/markdown characters
+  let clean = str.replace(/[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/g, "")
+                 .replace(/[^\w\s-]/g, "")
+                 .trim();
+  if (!clean) return "New Chat";
+  return clean.replace(
+    /\w\S*/g,
+    (txt) => txt.charAt(0).toUpperCase() + txt.substring(1).toLowerCase()
+  );
+}
+
 exports.saveSession = async (req, res) => {
   if (!req.user) return res.json({ message: "Guest mode, not saved" });
   const { sessionId, title, chatHistory, summary, flashcards, activeFiles } = req.body;
@@ -37,9 +50,32 @@ exports.saveSession = async (req, res) => {
       if (activeFiles !== undefined) updateData.activeFiles = activeFiles;
       session = await ChatSession.findByIdAndUpdate(sessionId, updateData, { new: true });
     } else {
+      let sessionTitle = title;
+      if (!sessionTitle) {
+        if (chatHistory && chatHistory.length > 0) {
+          try {
+            const firstMessage = chatHistory[0].text;
+            const titleResponse = await chatModel.invoke([
+              ["system", "You are a helpful assistant. Generate a short, 2 to 4 word title for this conversation based on the user's message. Do NOT include any emojis, logos, markdown, file extensions, or symbols. The title MUST be in Title Case (Capitalize The First Letter Of Each Word)."],
+              ["human", firstMessage]
+            ]);
+            sessionTitle = titleResponse.content.trim().replace(/["']/g, "");
+            sessionTitle = cleanAndTitleCase(sessionTitle);
+          } catch (e) {
+            console.error("AI title generation failed, falling back", e);
+            sessionTitle = cleanAndTitleCase(chatHistory[0].text.substring(0, 30));
+          }
+        } else if (activeFiles && activeFiles.length > 0) {
+          const baseName = activeFiles[0].replace(/\.[^/.]+$/, "");
+          sessionTitle = cleanAndTitleCase(baseName.replace(/[_-]/g, " "));
+        } else {
+          sessionTitle = "New Chat";
+        }
+      }
+
       session = new ChatSession({
         userId: req.user.id,
-        title: title || (chatHistory.length > 0 ? chatHistory[0].text.substring(0, 30) + "..." : "New Brain"),
+        title: sessionTitle,
         chatHistory,
         summary,
         flashcards,

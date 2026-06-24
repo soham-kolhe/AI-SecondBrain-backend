@@ -11,8 +11,7 @@ const authenticate = (req, res, next) => {
     req.user = verified;
     next();
   } catch (err) {
-    req.user = null; // Invalid token = Guest
-    next();
+    return res.status(401).json({ error: "Token expired or invalid. Please login again.", code: "TOKEN_INVALID" });
   }
 };
 
