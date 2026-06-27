@@ -6,6 +6,7 @@ const FileSchema = new mongoose.Schema({
   filePath: String,
   pineconeNamespace: { type: String, default: "student-notes" },
   uploadDate: { type: Date, default: Date.now },
+  aiNotes: { type: Array, default: [] },
 });
 
 module.exports = mongoose.model("File", FileSchema);

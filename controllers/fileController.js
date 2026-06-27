@@ -120,11 +120,31 @@ You MUST return ONLY a valid JSON object in this exact structure. Do not include
     });
     await newFile.save();
 
+    const cleanName = req.file.originalname.replace(/\.[^/.]+$/, "");
+    let ytVideos = [];
+    try {
+      let searchTerm = cleanName;
+      if (analysisData.summary && analysisData.summary.length > 0) {
+        const summaryText = analysisData.summary.join(". ");
+        const queryGen = await chatModel.invoke([
+          ["system", "You are an educational search assistant. Based on the document summary, generate a short 2 to 3 word YouTube search query to find high-quality educational videos explaining the core concepts. Return ONLY the search query. No quote marks, no emojis, no punctuation."],
+          ["human", `Document Summary: ${summaryText}`]
+        ]);
+        searchTerm = queryGen.content.trim().replace(/["']/g, "");
+      }
+      console.log(`🔍 Upload Ingest YouTube Search Query: "${searchTerm}"`);
+      const { searchYouTube } = require("../services/youtubeService");
+      ytVideos = await searchYouTube(searchTerm);
+    } catch (e) {
+      console.error("Failed to fetch YT recommendations during ingest", e);
+    }
+
     res.json({
       message: "Success",
       file: newFile,
       summary: analysisData.summary,
       flashcards: analysisData.flashcards,
+      ytVideos
     });
   } catch (err) {
     console.error("🔥 ASLI ERROR:", err);
@@ -225,6 +245,88 @@ exports.getFileText = async (req, res) => {
     res.json({ name: decodedName, pages });
   } catch (err) {
     console.error("Error extracting text pages:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.getFileAiNotes = async (req, res) => {
+  try {
+    const { name } = req.params;
+    const decodedName = decodeURIComponent(name).trim();
+
+    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const file = await FileModel.findOne({ 
+      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+    });
+    
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    // If already generated, return cached notes
+    if (file.aiNotes && file.aiNotes.length > 0) {
+      return res.json({ notes: file.aiNotes });
+    }
+
+    if (!file.filePath) {
+      return res.status(404).json({ error: "File has no file path" });
+    }
+
+    const absolutePath = path.resolve(file.filePath);
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: "File not found on disk" });
+    }
+
+    const pages = await extractTextPages(absolutePath);
+    if (!pages || pages.length === 0) {
+      return res.json({ notes: [] });
+    }
+
+    const combinedText = pages.map((p, idx) => `Page ${idx + 1}:\n${p.substring(0, 2000)}`).join("\n\n").substring(0, 15000);
+
+    const aiNotesResponse = await chatModel.invoke([
+      [
+        "system",
+        `You are a teaching assistant reading student notes. Extract 6-10 key academic concepts, definitions, or rules from the notes.
+For each extracted concept, you MUST:
+1. Provide the exact term or short phrase (1-4 words) as it appears in the notes (so we can highlight it in the text case-insensitively).
+2. Write a simplified, clear margin note (1-2 sentences) explaining it, suggesting an analogy, or giving a quick tip.
+3. Identify which pages (1-indexed) this concept is most relevant to (a list of page numbers).
+
+You MUST return ONLY a valid JSON object in this exact format. Do not wrap in markdown code fences.
+{
+  "notes": [
+    {
+      "concept": "exact phrase from text",
+      "explanation": "simple margin explanation...",
+      "pages": [1, 2]
+    }
+  ]
+}`
+      ],
+      ["human", `Document Text:\n${combinedText}`]
+    ]);
+
+    let notes = [];
+    try {
+      let content = aiNotesResponse.content;
+      if (content.includes("```json")) {
+        content = content.replace(/```json/g, "").replace(/```/g, "").trim();
+      } else if (content.includes("```")) {
+        content = content.replace(/```/g, "").trim();
+      }
+      const data = JSON.parse(content.substring(content.indexOf("{"), content.lastIndexOf("}") + 1));
+      notes = data.notes || [];
+    } catch (e) {
+      console.error("AI notes JSON parsing failed:", e);
+    }
+
+    file.aiNotes = notes;
+    await file.save();
+
+    res.json({ notes });
+  } catch (err) {
+    console.error("Error generating AI margin notes:", err);
     res.status(500).json({ error: err.message });
   }
 };

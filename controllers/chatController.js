@@ -188,7 +188,7 @@ function parseAIJson(content) {
 }
 
 exports.askChat = async (req, res) => {
-  const { question, strictMode, mode } = req.body;
+  const { question, strictMode, mode, activeFile } = req.body;
   const isCommand = typeof question === "string" && question.trim().startsWith("/");
   const ownerId = req.user ? req.user.id : req.ip;
 
@@ -228,14 +228,14 @@ exports.askChat = async (req, res) => {
         const targetName = file ? file.name : filename;
         
         return res.json({
-          answer: `Context set to: **${targetName}**. Type \`/10\` to generate questions!`, 
+          answer: `Context set to: **${targetName}**. Type \`/quiz\` to generate questions!`, 
           activeFile: targetName,
           type: "assessment_start"
         });
       }
 
-      if (command === "/10") {
-        const targetFile = filename || "the document";
+      if (command === "/10" || command === "/quiz") {
+        const targetFile = filename || activeFile || "the document";
         const { context, sources } = await fetchPineconeContext(`Additional challenging topics from ${targetFile}`, ownerId, 8);
 
         const aiResponse = await chatModel.invoke([
@@ -290,6 +290,129 @@ exports.askChat = async (req, res) => {
         });
       }
 
+      if (command === "/yt") {
+        if (!filename) {
+          return res.json({ answer: "What topic do you want to search videos for on YouTube? (Example: /yt photosynthesis)", type: "prompt" });
+        }
+        let finalAnswer = `Here are the top YouTube videos found for **${filename}**:`;
+        let finalSources = [];
+        try {
+          const { searchYouTube } = require("../services/youtubeService");
+          const videos = await searchYouTube(filename);
+          if (videos && videos.length > 0) {
+            const links = videos.map(v => `- [${v.title}](${v.url})`).join("\n");
+            finalAnswer += `\n${links}`;
+            finalSources = videos.map(v => v.url);
+          }
+        } catch (e) {
+          const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(filename)}`;
+          finalAnswer += `\n- [Search YouTube for "${filename}"](${ytUrl})`;
+          finalSources = [ytUrl];
+        }
+        return res.json({
+          answer: finalAnswer,
+          sources: finalSources,
+          type: "youtube_search"
+        });
+      }
+
+      if (command === "/explain") {
+        if (!filename) {
+          return res.json({ answer: "What concept or topic should I explain? (Example: /explain Mitosis)", type: "prompt" });
+        }
+        
+        const { context, sources } = await fetchPineconeContext(filename, ownerId, 6);
+        const aiResponse = await chatModel.invoke([
+          ["system", `You are a Senior Educator. Explain the concept requested by the student clearly, using bullet points, a summary, and key takeaways. Base your explanation on the student's notes context if available, otherwise general knowledge.
+          Context:\n${context}`],
+          ["human", `Explain the concept: "${filename}"`],
+        ]);
+        
+        let finalExplain = aiResponse.content;
+        let finalSources = [...sources];
+        try {
+          const { searchYouTube } = require("../services/youtubeService");
+          const videos = await searchYouTube(filename);
+          if (videos && videos.length > 0) {
+            const links = videos.map(v => `- [${v.title}](${v.url})`).join("\n");
+            finalExplain += `\n\n📺 **Recommended YouTube Reference:**\n${links}`;
+            finalSources = [...finalSources, ...videos.map(v => v.url)];
+          }
+        } catch (e) {
+          console.error("Failed to append YT to explain", e);
+        }
+        
+        return res.json({
+          answer: finalExplain,
+          sources: finalSources,
+          type: "concept_explanation"
+        });
+      }
+
+      if (command === "/summary") {
+        let targetFile = filename || activeFile;
+        if (!targetFile) {
+          const lastFile = await FileModel.findOne({ userId: ownerId }).sort({ uploadDate: -1 });
+          if (lastFile) {
+            targetFile = lastFile.name;
+          }
+        }
+
+        if (!targetFile) {
+          return res.json({ answer: "⚠️ No document found in this Brain. Please upload a PDF first to generate a summary.", type: "error" });
+        }
+        
+        const { context, sources } = await fetchPineconeContext(`Summary and key concepts of ${targetFile}`, ownerId, 8);
+        if (!context) {
+          return res.json({ answer: `⚠️ Could not find any retrieved content for **${targetFile}**. Please make sure the file is uploaded correctly.`, type: "error" });
+        }
+
+        const aiResponse = await chatModel.invoke([
+          ["system", `You are a study assistant. Generate a highly structured summary of the document context in HTML collapsible accordions using the <details> and <summary> tags.
+          
+Create exactly three sections:
+1. <details><summary><b>📖 Key Definitions</b></summary>
+<br/>
+List key terms, definitions, and acronyms from the context in bullet points. Explain each term clearly in 1 sentence.
+</details>
+
+2. <details><summary><b>⚙️ Formulae & Rules</b></summary>
+<br/>
+List important equations, formulae, guidelines, rules, methodologies, or processes found in the context.
+</details>
+
+3. <details><summary><b>📝 Main Summary</b></summary>
+<br/>
+Provide a concise, high-level summary of the main subject matter, findings, or message of the document in 3-5 bullet points.
+</details>
+
+Make sure to format the content inside the details blocks beautifully using standard markdown bullet points, bold text, etc. Do NOT wrap the entire output in code fences (like \`\`\`html or \`\`\`xml).`],
+          ["system", `Context:\n${context}`],
+          ["human", `Generate the collapsible interactive summary for the document "${targetFile}".`],
+        ]);
+
+        let finalSummary = aiResponse.content;
+        let finalSources = [...sources];
+        try {
+          const cleanName = targetFile.replace(/\.[^/.]+$/, "");
+          const { searchYouTube } = require("../services/youtubeService");
+          const videos = await searchYouTube(cleanName);
+          if (videos && videos.length > 0) {
+            const links = videos.map(v => `- [${v.title}](${v.url})`).join("\n");
+            finalSummary += `\n\n📺 **Recommended YouTube Reference:**\n${links}`;
+            finalSources = [...finalSources, ...videos.map(v => v.url)];
+          }
+        } catch (e) {
+          console.error("Failed to append YT to summary", e);
+        }
+
+        return res.json({
+          answer: finalSummary,
+          sources: finalSources,
+          type: "document_summary"
+        });
+      }
+
       return res.json({ answer: `Unknown command: ${command}` });
     } catch (err) {
       console.error(err);
@@ -310,7 +433,28 @@ exports.askChat = async (req, res) => {
       ["human", question],
     ]);
 
-    res.json({ answer: response.content, sources: sources });
+    let finalAnswer = response.content;
+    let finalSources = [...sources];
+    if (mode === "study" || mode === "research") {
+      try {
+        const queryGen = await chatModel.invoke([
+          ["system", "You are a search query optimizer. Given a student's question and context snippet, generate a short, 2 to 3 word search query suitable for finding relevant educational explanation videos on YouTube. Return ONLY the search query. No quote marks, no emojis, no punctuation."],
+          ["human", `Question: ${question}\nContext snippet: ${context.substring(0, 1000)}`]
+        ]);
+        const searchTerm = queryGen.content.trim().replace(/["']/g, "");
+        const { searchYouTube } = require("../services/youtubeService");
+        const videos = await searchYouTube(searchTerm);
+        if (videos && videos.length > 0) {
+          const links = videos.map(v => `- [${v.title}](${v.url})`).join("\n");
+          finalAnswer += `\n\n📺 **Recommended YouTube Reference:**\n${links}`;
+          finalSources = [...finalSources, ...videos.map(v => v.url)];
+        }
+      } catch (e) {
+        console.error("Failed to generate YT recommendation link", e);
+      }
+    }
+
+    res.json({ answer: finalAnswer, sources: finalSources });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
