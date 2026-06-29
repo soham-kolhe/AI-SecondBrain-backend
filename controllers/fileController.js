@@ -5,6 +5,7 @@ const { extractText, extractTextPages } = require("../services/pdfService");
 const { chatModel, embeddings } = require("../services/aiService");
 const { Pinecone } = require("@pinecone-database/pinecone");
 const { RecursiveCharacterTextSplitter } = require("@langchain/textsplitters");
+const { exactNameFilter } = require("../utils/regexSafe");
 
 exports.getFiles = async (req, res) => {
   if (!req.user) return res.json([]);
@@ -49,7 +50,7 @@ console.log(
     const describeIndex = await pc.describeIndex(process.env.PINECONE_INDEX.trim());
     const host = describeIndex.host;
 
-    const ownerId = req.user ? req.user.id : req.ip;
+    const ownerId = req.ownerId;
     const records = docs.map((doc, i) => ({
       id: `v-${Date.now()}-${i}`,
       values: vectors[i],
@@ -170,7 +171,7 @@ exports.deleteFile = async (req, res) => {
       body: JSON.stringify({
         filter: { 
           source: { $eq: name },
-          userId: { $eq: req.user ? req.user.id : req.ip }
+          userId: { $eq: req.ownerId }
         }, 
         namespace: "student-notes",
       }),
@@ -189,11 +190,8 @@ exports.viewFile = async (req, res) => {
     console.log("PDF Viewer requested name (raw):", name);
     console.log("PDF Viewer requested name (decoded):", decodedName);
 
-    // Escape regex characters helper
-    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
     const file = await FileModel.findOne({ 
-      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+      name: exactNameFilter(decodedName) 
     });
     
     console.log("Found file in DB:", file);
@@ -227,9 +225,8 @@ exports.getFileText = async (req, res) => {
     console.log("PDF text requested name (raw):", name);
     console.log("PDF text requested name (decoded):", decodedName);
 
-    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const file = await FileModel.findOne({ 
-      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+      name: exactNameFilter(decodedName) 
     });
     
     if (!file || !file.filePath) {
@@ -254,9 +251,8 @@ exports.getFileAiNotes = async (req, res) => {
     const { name } = req.params;
     const decodedName = decodeURIComponent(name).trim();
 
-    const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const file = await FileModel.findOne({ 
-      name: { $regex: new RegExp("^" + escapeRegExp(decodedName) + "$", "i") } 
+      name: exactNameFilter(decodedName) 
     });
     
     if (!file) {

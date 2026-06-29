@@ -190,7 +190,7 @@ function parseAIJson(content) {
 exports.askChat = async (req, res) => {
   const { question, strictMode, mode, activeFile } = req.body;
   const isCommand = typeof question === "string" && question.trim().startsWith("/");
-  const ownerId = req.user ? req.user.id : req.ip;
+  const ownerId = req.ownerId;
 
   // 1. SECURITY & AUTH GUARD
   if (mode === "test" || (isCommand && question.trim() !== "/reset" && question.trim() !== "/clear")) {
@@ -224,7 +224,8 @@ exports.askChat = async (req, res) => {
         }
         
         // Try to match an exact file, otherwise treat it as a topic
-        const file = await FileModel.findOne({ userId: req.user.id, name: { $regex: filename, $options: "i" } });
+        const { containsFilter } = require("../utils/regexSafe");
+        const file = await FileModel.findOne({ userId: req.user.id, name: containsFilter(filename) });
         const targetName = file ? file.name : filename;
         
         return res.json({

@@ -2,11 +2,14 @@ const FlashcardModel = require("../models/Flashcard");
 const UserAnalytics = require("../models/UserAnalytics");
 
 exports.getProactiveReview = async (req, res) => {
+  if (!req.user) return res.json([]);
   try {
     const today = new Date();
+    today.setHours(23, 59, 59, 999); // Include all cards due by the end of today
     const cardsToReview = await FlashcardModel.find({
+      userId: req.user.id,
       nextReviewDate: { $lte: today },
-    }).limit(5);
+    }).limit(20);
 
     res.json(cardsToReview);
   } catch (err) {
@@ -67,6 +70,45 @@ exports.getReminders = async (req, res) => {
     .limit(5);
 
     res.json(reminders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.trackFlashcardPerformance = async (req, res) => {
+  const { flashcardId, isCorrect } = req.body;
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const card = await FlashcardModel.findOne({ _id: flashcardId, userId: req.user.id });
+    if (!card) {
+      return res.status(404).json({ error: "Flashcard not found" });
+    }
+
+    const { calculateSM2 } = require("../services/srsService");
+    const quality = isCorrect ? 4 : 1; // Map binary Correct -> 4, Incorrect -> 1
+
+    const updates = calculateSM2(
+      card.repetitions || 0,
+      card.interval || 0,
+      card.easeFactor || 2.5,
+      quality
+    );
+
+    card.repetitions = updates.repetitions;
+    card.interval = updates.interval;
+    card.easeFactor = updates.easeFactor;
+    card.nextReviewDate = updates.nextReviewDate;
+
+    await card.save();
+
+    res.json({
+      status: "updated",
+      nextReviewDate: card.nextReviewDate,
+      interval: card.interval,
+      repetitions: card.repetitions,
+      easeFactor: card.easeFactor
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
