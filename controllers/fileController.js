@@ -157,6 +157,11 @@ exports.deleteFile = async (req, res) => {
   try {
     const { id, name } = req.params;
 
+    const file = await FileModel.findOne({ _id: id, userId: req.ownerId });
+    if (!file) {
+      return res.status(404).json({ error: "File not found or unauthorized" });
+    }
+
     await FileModel.findByIdAndDelete(id);
 
     const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
@@ -191,7 +196,8 @@ exports.viewFile = async (req, res) => {
     console.log("PDF Viewer requested name (decoded):", decodedName);
 
     const file = await FileModel.findOne({ 
-      name: exactNameFilter(decodedName) 
+      name: exactNameFilter(decodedName),
+      userId: req.ownerId
     });
     
     console.log("Found file in DB:", file);
@@ -226,7 +232,8 @@ exports.getFileText = async (req, res) => {
     console.log("PDF text requested name (decoded):", decodedName);
 
     const file = await FileModel.findOne({ 
-      name: exactNameFilter(decodedName) 
+      name: exactNameFilter(decodedName),
+      userId: req.ownerId
     });
     
     if (!file || !file.filePath) {
@@ -252,7 +259,8 @@ exports.getFileAiNotes = async (req, res) => {
     const decodedName = decodeURIComponent(name).trim();
 
     const file = await FileModel.findOne({ 
-      name: exactNameFilter(decodedName) 
+      name: exactNameFilter(decodedName),
+      userId: req.ownerId
     });
     
     if (!file) {

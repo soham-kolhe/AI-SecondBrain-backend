@@ -155,15 +155,20 @@ OUTPUT FORMAT (return ONLY this):
   ]
 }`;
 
-async function fetchPineconeContext(query, ownerId, topK = 6) {
+async function fetchPineconeContext(query, ownerId, topK = 6, sourceFile = null) {
   const queryVector = await embeddings.embedQuery(query);
   const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
   const describeIndex = await pc.describeIndex(process.env.PINECONE_INDEX.trim());
 
+  const filter = { userId: ownerId };
+  if (sourceFile) {
+    filter.source = { $eq: sourceFile };
+  }
+
   const searchRes = await fetch(`https://${describeIndex.host}/query`, {
     method: "POST",
     headers: { "Api-Key": process.env.PINECONE_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ vector: queryVector, topK, includeMetadata: true, namespace: "student-notes", filter: { userId: ownerId } }),
+    body: JSON.stringify({ vector: queryVector, topK, includeMetadata: true, namespace: "student-notes", filter }),
   });
 
   const data = await searchRes.json();
@@ -179,12 +184,22 @@ async function fetchPineconeContext(query, ownerId, topK = 6) {
 }
 
 function parseAIJson(content) {
-  if (content.includes("```json")) {
-    content = content.replace(/```json/g, "").replace(/```/g, "").trim();
-  } else if (content.includes("```")) {
-    content = content.replace(/```/g, "").trim();
+  try {
+    if (content.includes("```json")) {
+      content = content.replace(/```json/g, "").replace(/```/g, "").trim();
+    } else if (content.includes("```")) {
+      content = content.replace(/```/g, "").trim();
+    }
+    const startIndex = content.indexOf("{");
+    const endIndex = content.lastIndexOf("}");
+    if (startIndex === -1 || endIndex === -1) {
+      throw new Error("No JSON object found in content");
+    }
+    return JSON.parse(content.substring(startIndex, endIndex + 1));
+  } catch (err) {
+    console.error("AI JSON parsing failed:", err);
+    throw err;
   }
-  return JSON.parse(content.substring(content.indexOf("{"), content.lastIndexOf("}") + 1));
 }
 
 exports.askChat = async (req, res) => {
@@ -236,16 +251,41 @@ exports.askChat = async (req, res) => {
       }
 
       if (command === "/10" || command === "/quiz") {
-        const targetFile = filename || activeFile || "the document";
-        const { context, sources } = await fetchPineconeContext(`Additional challenging topics from ${targetFile}`, ownerId, 8);
+        const targetFile = filename || activeFile;
+        let sourceFile = null;
+        if (targetFile) {
+          const { containsFilter } = require("../utils/regexSafe");
+          const file = await FileModel.findOne({ userId: req.user.id, name: containsFilter(targetFile) });
+          if (file) sourceFile = file.name;
+        }
+
+        const { context, sources } = await fetchPineconeContext(
+          `Additional challenging topics from ${sourceFile || targetFile || "the notes"}`,
+          ownerId,
+          8,
+          sourceFile
+        );
 
         const aiResponse = await chatModel.invoke([
           ["system", MCQ_SYSTEM_PROMPT],
           ["system", `Document Context:\n${context}`],
-          ["human", `Generate 10 NEW and DIFFERENT challenging MCQs from "${targetFile}".`],
+          ["human", `Generate 10 NEW and DIFFERENT challenging MCQs from "${sourceFile || targetFile || "the notes"}".`],
         ]);
 
-        let quizData = parseAIJson(aiResponse.content);
+        let quizData;
+        try {
+          quizData = parseAIJson(aiResponse.content);
+          if (!quizData || !Array.isArray(quizData.mcqs)) {
+            throw new Error("Invalid MCQ structure returned by AI");
+          }
+        } catch (err) {
+          console.error("Quiz generation failed to yield parseable JSON:", err);
+          return res.json({
+            answer: "⚠️ Sorry, I had trouble parsing the quiz format. Please run `/quiz` again.",
+            flashcards: [],
+            sources
+          });
+        }
         
         const flashcardsToSave = quizData.mcqs.map((q) => ({
           userId: req.user.id,
@@ -283,7 +323,21 @@ exports.askChat = async (req, res) => {
           ["human", `The student is weak in these specific topics: ${topicNames.join(", ")}. Generate 10 MCQs that specifically target ONLY these weak areas.`],
         ]);
 
-        let quizData = parseAIJson(aiResponse.content);
+        let quizData;
+        try {
+          quizData = parseAIJson(aiResponse.content);
+          if (!quizData || !Array.isArray(quizData.mcqs)) {
+            throw new Error("Invalid weak topics MCQ structure returned by AI");
+          }
+        } catch (err) {
+          console.error("Weak topics quiz generation failed to yield parseable JSON:", err);
+          return res.json({
+            answer: "⚠️ Sorry, I had trouble parsing the quiz format for weak topics. Please run `/weak` again.",
+            flashcards: [],
+            sources
+          });
+        }
+
         return res.json({
           answer: `Targeting your weak areas: **${topicNames.join(", ")}**`,
           flashcards: quizData.mcqs.map(q => ({ ...q, correctAnswer: q.correct })),
@@ -322,7 +376,14 @@ exports.askChat = async (req, res) => {
           return res.json({ answer: "What concept or topic should I explain? (Example: /explain Mitosis)", type: "prompt" });
         }
         
-        const { context, sources } = await fetchPineconeContext(filename, ownerId, 6);
+        let sourceFile = null;
+        if (activeFile) {
+          const { containsFilter } = require("../utils/regexSafe");
+          const file = await FileModel.findOne({ userId: ownerId, name: containsFilter(activeFile) });
+          if (file) sourceFile = file.name;
+        }
+
+        const { context, sources } = await fetchPineconeContext(filename, ownerId, 6, sourceFile);
         const aiResponse = await chatModel.invoke([
           ["system", `You are a Senior Educator. Explain the concept requested by the student clearly, using bullet points, a summary, and key takeaways. Base your explanation on the student's notes context if available, otherwise general knowledge.
           Context:\n${context}`],
@@ -363,7 +424,11 @@ exports.askChat = async (req, res) => {
           return res.json({ answer: "⚠️ No document found in this Brain. Please upload a PDF first to generate a summary.", type: "error" });
         }
         
-        const { context, sources } = await fetchPineconeContext(`Summary and key concepts of ${targetFile}`, ownerId, 8);
+        const { containsFilter } = require("../utils/regexSafe");
+        const file = await FileModel.findOne({ userId: ownerId, name: containsFilter(targetFile) });
+        const sourceFile = file ? file.name : null;
+
+        const { context, sources } = await fetchPineconeContext(`Summary and key concepts of ${sourceFile || targetFile}`, ownerId, 8, sourceFile);
         if (!context) {
           return res.json({ answer: `⚠️ Could not find any retrieved content for **${targetFile}**. Please make sure the file is uploaded correctly.`, type: "error" });
         }
@@ -423,7 +488,14 @@ Make sure to format the content inside the details blocks beautifully using stan
 
   // 3. STANDARD RAG CHAT
   try {
-    const { context, sources } = await fetchPineconeContext(question, ownerId, 4);
+    let sourceFile = null;
+    if (activeFile) {
+      const { containsFilter } = require("../utils/regexSafe");
+      const file = await FileModel.findOne({ userId: ownerId, name: containsFilter(activeFile) });
+      if (file) sourceFile = file.name;
+    }
+
+    const { context, sources } = await fetchPineconeContext(question, ownerId, 4, sourceFile);
 
     const strictPrompt = `You are a Strict Student Assistant. RULES:\n1. Use ONLY the provided context to answer. \n2. If the answer is NOT in the context, say EXACTLY: "Bhai, ye tere notes mein nahi hai, shayad sir ne nahi padhaya."\n3. Do not use your own knowledge or the internet.\n4. No citation brackets like [a], [b].`;
     const normalPrompt = `You are a helpful assistant. Use the context to answer, but if it's missing, you can provide general guidance while mentioning it's not in the notes.`;
